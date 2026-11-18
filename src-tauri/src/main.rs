@@ -9,6 +9,14 @@ use tauri_plugin_shell::ShellExt;
 
 struct SidecarState(Mutex<Option<CommandChild>>);
 
+/// 极简时间戳，免得为了写日志引入 chrono 依赖。
+fn chrono_now() -> String {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs().to_string(),
+        Err(_) => "0".to_string(),
+    }
+}
+
 /// sidecar 的 PID：信号处理器不是 async-signal-safe，只能存原始 pid，退出时用它兜底杀进程。
 static SIDECAR_PID: OnceLock<i32> = OnceLock::new();
 
@@ -60,28 +68,68 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&data_dir).ok();
+            let log_path = data_dir.join("desktop.log");
+            let log = move |msg: String| {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    let _ = writeln!(f, "[{}] {}", chrono_now(), msg);
+                }
+            };
+            log(format!("启动，data_dir={:?}", data_dir));
 
-            // 外部环境变量优先，便于 CI 冒烟测试与排障；未设置时用桌面版的默认值。
-            let port = std::env::var("PORT").unwrap_or_else(|_| "8788".to_string());
-            let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| {
-                data_dir.join("radar.db").to_string_lossy().to_string()
-            });
+            // PORT 允许为空字符串时不要当成有效值：空串会让窗口连到 80 端口。
+            let port = std::env::var("PORT")
+                .ok()
+                .and_then(|v| v.trim().parse::<u16>().ok())
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "8788".to_string());
+            let db_path = std::env::var("DATABASE_PATH")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| data_dir.join("radar.db").to_string_lossy().to_string());
+            log(format!("port={} db={}", port, db_path));
 
             // spawn sidecar
             let resource_dir = app.path().resource_dir().expect("resource dir");
-            // dist/server.mjs is bundled by esbuild; placed at <res>/src/server/server.mjs so the
-            // server's `../../dist/web` (relative to import.meta.url) resolves to <res>/dist/web.
-            let server_entry = resource_dir
-                .join("src")
-                .join("server")
-                .join("server.mjs");
-            let (_rx, child) = app
-                .shell()
-                .sidecar("node")
-                .expect("sidecar")
+            // 资源目录兜底：APPDIR/APPIMAGE 等环境变量（例如从 AppImage 包内启动的父进程）
+            // 会污染 Tauri 的推断，导致资源目录指向别处。这里从可执行文件路径反推一份候选。
+            let mut candidates = vec![resource_dir.clone()];
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    candidates.push(dir.to_path_buf());
+                    // deb 安装布局：/usr/lib/<app>/<app>，资源就在同目录
+                    if let Some(parent) = dir.parent() {
+                        candidates.push(parent.to_path_buf());
+                    }
+                }
+            }
+            let server_entry = candidates
+                .iter()
+                .map(|base| base.join("src").join("server").join("server.mjs"))
+                .find(|p| p.exists());
+            let Some(server_entry) = server_entry else {
+                let msg = format!(
+                    "找不到 server.mjs，已尝试：{:?}",
+                    candidates
+                        .iter()
+                        .map(|b| b.join("src/server/server.mjs"))
+                        .collect::<Vec<_>>()
+                );
+                log(msg.clone());
+                eprintln!("[radar-desktop] {msg}");
+                return Ok(());
+            };
+            log(format!("server_entry={:?}", server_entry));
+
+            let sidecar_cmd = app.shell().sidecar("node").expect("sidecar");
+            let (_rx, child) = match sidecar_cmd
                 .args([server_entry.to_string_lossy().to_string()])
                 .current_dir(data_dir.clone())
-                .env("DATABASE_PATH", db_path)
+                .env("DATABASE_PATH", &db_path)
                 .env("PORT", &port)
                 .env("HOST", "127.0.0.1")
                 .env("TZ", "Asia/Shanghai")
@@ -90,7 +138,16 @@ fn main() {
                     std::env::var("ENABLE_SCHEDULER").unwrap_or_else(|_| "true".to_string()),
                 )
                 .spawn()
-                .expect("spawn sidecar");
+            {
+                Ok(v) => {
+                    log(format!("sidecar 已启动 pid={}", v.1.pid()));
+                    v
+                }
+                Err(e) => {
+                    log(format!("sidecar 启动失败: {e}"));
+                    return Ok(());
+                }
+            };
 
             {
                 let state = app.state::<SidecarState>();
@@ -112,7 +169,9 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(500));
             }
             if !ready {
-                eprintln!("sidecar did not become healthy");
+                log("sidecar 30 秒内未就绪".to_string());
+            } else {
+                log("sidecar health OK".to_string());
             }
 
             // 窗口已在 tauri.conf.json 里声明（label = main），这里只把它导航到实际端口再显示，
@@ -125,6 +184,21 @@ fn main() {
                 let _ = window.navigate(url);
             }
             let _ = window.show();
+            if !ready {
+                // 别让用户只看到一个浏览器默认错误页，把排查线索直接写进窗口。
+                let hint = format!(
+                    "<html><body style=\"font-family:sans-serif;padding:24px;line-height:1.6\">\
+                     <h3>后端服务未能启动</h3>\
+                     <p>已尝试连接 <code>http://127.0.0.1:{port}</code>，但没有响应。</p>\
+                     <p>详细日志：<code>{}/desktop.log</code></p>\
+                     <p>常见原因：端口 {port} 被其它程序占用；或安装包缺少 node 侧车。</p></body></html>",
+                    data_dir.display()
+                );
+                let _ = window.eval(&format!(
+                    "document.open();document.write({});document.close();",
+                    serde_json::to_string(&hint).unwrap_or_else(|_| "\"\"".to_string())
+                ));
+            }
 
             // tray menu
             let show_i = MenuItem::with_id(app, "show", "显示", true, None::<&str>).unwrap();
