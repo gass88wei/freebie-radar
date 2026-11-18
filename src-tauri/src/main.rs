@@ -28,10 +28,12 @@ extern "C" fn kill_sidecar_on_signal(_sig: i32) {
 
 #[cfg(unix)]
 fn install_signal_handlers() {
+    // clippy::function_casts_as_integer：函数项要先转成指针再转整数
+    let handler = kill_sidecar_on_signal as *const () as libc::sighandler_t;
     unsafe {
-        libc::signal(libc::SIGTERM, kill_sidecar_on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGINT, kill_sidecar_on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, kill_sidecar_on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGHUP, handler);
     }
 }
 
