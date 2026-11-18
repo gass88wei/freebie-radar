@@ -43,7 +43,6 @@ jobs:
 
   rust-check:
     runs-on: ubuntu-22.04
-    if: hashFiles('src-tauri/Cargo.toml') != ''
     steps:
       - uses: actions/checkout@v4
       - name: Install Tauri system dependencies
