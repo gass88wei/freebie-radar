@@ -10,17 +10,7 @@
     "beforeDevCommand": "npm run dev:web"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "freebie-radar",
-        "width": 1280,
-        "height": 800,
-        "visible": false,
-        "resizable": true,
-        "center": true
-      }
-    ],
+    "windows": [],
     "trayIcon": {
       "id": "main-tray",
       "iconPath": "icons/128x128.png",

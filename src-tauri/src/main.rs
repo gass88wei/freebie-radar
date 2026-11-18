@@ -126,7 +126,7 @@ fn main() {
             log(format!("server_entry={:?}", server_entry));
 
             let sidecar_cmd = app.shell().sidecar("node").expect("sidecar");
-            let (_rx, child) = match sidecar_cmd
+            let (mut rx, child) = match sidecar_cmd
                 .args([server_entry.to_string_lossy().to_string()])
                 .current_dir(data_dir.clone())
                 .env("DATABASE_PATH", &db_path)
@@ -148,6 +148,32 @@ fn main() {
                     return Ok(());
                 }
             };
+
+            // 必须持续消费 sidecar 的 stdout/stderr：
+            // 丢弃接收端会让管道缓冲填满，node 写日志时被阻塞，服务随之卡死。
+            let srv_log_path = data_dir.join("server.log");
+            std::thread::spawn(move || {
+                use std::io::Write;
+                while let Some(event) = rx.blocking_recv() {
+                    if let tauri_plugin_shell::process::CommandEvent::Stdout(bytes) = &event {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&srv_log_path)
+                        {
+                            let _ = f.write_all(bytes);
+                        }
+                    } else if let tauri_plugin_shell::process::CommandEvent::Stderr(bytes) = &event {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&srv_log_path)
+                        {
+                            let _ = f.write_all(bytes);
+                        }
+                    }
+                }
+            });
 
             {
                 let state = app.state::<SidecarState>();
@@ -174,15 +200,28 @@ fn main() {
                 log("sidecar health OK".to_string());
             }
 
-            // 窗口已在 tauri.conf.json 里声明（label = main），这里只把它导航到实际端口再显示，
-            // 避免重复创建同名窗口导致 panic。
-            let window = app
-                .get_webview_window("main")
-                .expect("main window declared in tauri.conf.json");
+            // 直接用外部 URL 建窗口：前端所有请求都是相对路径（/api/...），
+            // 必须让页面 origin 就是 http://127.0.0.1:<port>。
+            // 若把窗口声明在 tauri.conf.json 里，窗口最初加载的是内置 tauri://localhost，
+            // 再 navigate 过去也容易停在旧 origin，表现为页面能渲染但 /api 全部 Load failed。
             let app_url = format!("http://127.0.0.1:{}", port);
-            if let Ok(url) = app_url.parse::<tauri::Url>() {
-                let _ = window.navigate(url);
-            }
+            let url = app_url.parse::<tauri::Url>().expect("valid app url");
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::External(url),
+            )
+            .title("资源雷达")
+            .inner_size(1280.0, 800.0)
+            .center()
+            .build();
+            let window = match window {
+                Ok(w) => w,
+                Err(e) => {
+                    log(format!("创建窗口失败: {e}"));
+                    return Ok(());
+                }
+            };
             let _ = window.show();
             if !ready {
                 // 别让用户只看到一个浏览器默认错误页，把排查线索直接写进窗口。
