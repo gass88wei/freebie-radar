@@ -63,10 +63,12 @@ grep "  $ARCHIVE\$" "$shasums_file" > "$TMP/expected.sha256" \
 
 log "解压 node ..."
 tar -xJf "$TMP/$ARCHIVE" -C "$TMP"
-[[ -x "$TMP/$EXTRACT_DIR/node" ]] || die "未找到解压后的 node 二进制"
+# 官方归档里 node 在 <dir>/bin/node，不是 <dir>/node
+NODE_BIN="$TMP/$EXTRACT_DIR/bin/node"
+[[ -x "$NODE_BIN" ]] || die "未找到解压后的 node 二进制：$NODE_BIN"
 
 mkdir -p "$TARGET_DIR"
-cp "$TMP/$EXTRACT_DIR/node" "$TARGET"
+cp "$NODE_BIN" "$TARGET"
 chmod 755 "$TARGET"
 
 log "完成：$TARGET"
