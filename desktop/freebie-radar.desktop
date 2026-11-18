@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Resource Radar
+Name[zh_CN]=资源雷达
+Comment=Multi-interest community info aggregator and push workbench
+Comment[zh_CN]=多兴趣社区信息聚合与精准推送工作台
+Exec=freebie-radar
+Icon=freebie-radar
+Terminal=false
+StartupNotify=true
+Categories=Network;Utility;

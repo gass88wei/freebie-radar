@@ -77,3 +77,93 @@ docker compose up -d --build
    ```
 2. 打开雷达网页「数据源运维」，点击对应源的 **「扫码登录」** 按钮：会跳往本地 `http://127.0.0.1:18789/login` 弹窗扫码；登录成功后自动采集一轮公开帖子推入 `/api/ingest`，**立即关闭浏览器释放全部内存并跳回雷达页面**。
 3. 不想安装 Node / Playwright 的用户，也可在「数据源运维 → 登录态接入」中一键复制 **Tampermonkey 油猴脚本**，直接在日常浏览器里触发回传。
+
+## 桌面版部署（无 Docker）{#desktop}
+
+不想装 Docker 的用户可以用 Tauri 桌面版：Node.js 24 LTS 以**侧车（sidecar）单文件**随安装包分发，在本机原生运行，不依赖容器；采集、SQLite、推送逻辑与 Docker / 源码版完全一致。
+
+### 前置依赖
+
+- `webkit2gtk-4.1`（Debian/Ubuntu：`sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0`）
+- `curl`（用于采集与下载更新；桌面版自带 Node，无需单独安装 Node.js）
+- 若从源码构建：Node.js ≥ 22.5、pnpm 10、Rust 工具链（仅构建 Tauri 时需要，安装成品包不需要）
+
+侧车准备（仅源码构建需要）：
+
+```bash
+scripts/build-sidecar.sh   # 下载 Node 24 LTS linux-x64，输出 src-tauri/binaries/node-x86_64-unknown-linux-gnu
+```
+
+### 安装 .deb / AppImage
+
+从 GitHub Releases 下载最新安装包：
+
+```bash
+# Debian/Ubuntu（自动解析依赖）
+sudo apt install ./freebie-radar_*_amd64.deb
+
+# 任意发行版（免安装）
+chmod +x freebie-radar_*.AppImage
+./freebie-radar_*.AppImage
+```
+
+安装后从应用菜单启动 **Resource Radar**，首次启动会自动创建数据目录并打开工作台窗口。AppImage 需要 FUSE 2；若提示无法挂载，可加 `--appimage-extract-and-run` 参数运行，或安装 `libfuse2`。
+
+### 自启动
+
+- 应用内「设置 → 开机自启」打开即可。
+- 手动配置（无桌面环境托盘时）：
+
+```bash
+mkdir -p ~/.config/autostart
+cp /usr/share/applications/freebie-radar.desktop ~/.config/autostart/
+```
+
+### 托盘
+
+桌面版默认常驻系统托盘，右键菜单提供「打开工作台 / 暂停采集 / 立即采集 / 退出」。关闭主窗口只会隐藏窗口，采集与推送仍在后台运行；只有「退出」才会真正结束进程。
+
+### 数据位置
+
+| 内容 | 路径 |
+|---|---|
+| 数据库 / 日志 / 采集缓存 | `~/.local/share/freebie-radar`（`radar.db`、日志目录） |
+| 配置（端口、更新通道等） | `~/.config/freebie-radar` |
+| 环境变量覆盖 | 同上目录的 `.env`，或启动时注入 `PORT` 等变量 |
+
+数据目录遵循 `XDG_DATA_HOME` / `XDG_CONFIG_HOME`；卸载软件包不会删除这些目录，重装或升级后数据零丢失。
+
+### 升级
+
+- **应用内更新（推荐）**：「设置 → 检查更新」，自动下载并安装新的 `.deb` / `.AppImage`，数据库自动迁移，数据不丢。
+- **源码构建更新**：
+
+```bash
+git pull origin main
+pnpm install
+pnpm build
+scripts/build-sidecar.sh
+pnpm tauri build
+sudo apt install ./src-tauri/target/release/bundle/deb/freebie-radar_*_amd64.deb
+```
+
+- **手动替换**：停掉托盘进程后直接覆盖安装新包；`~/.local/share/freebie-radar` 不受影响。
+
+### 故障排查
+
+**端口 8788 被占用**
+
+- 现象：启动失败或页面打不开，日志提示 `EADDRINUSE`。
+- 排查：`ss -lntp | grep 8788`（或 `lsof -i :8788`），确认是否已有雷达实例或别的服务占用。
+- 解决：退出残留实例（`pkill -f freebie-radar`），或在「设置」里改监听端口；也可用 `PORT=9000 freebie-radar` 临时换端口启动。
+
+**Node 侧车启动失败**
+
+- 现象：托盘显示「服务未就绪」，日志出现 sidecar 退出码非 0。
+- 逐项检查：
+  1. 二进制可执行：`ls -l ~/.local/share/freebie-radar/...` 与 `src-tauri/binaries/node-x86_64-unknown-linux-gnu -v`，应输出 `v24.x.x`；无执行权限时 `chmod +x`。
+  2. 架构/ABI：仅支持 x86_64 + glibc；ARM 设备需重新构建对应侧车。
+  3. 依赖库：`ldd <node 侧车路径>` 查看是否缺库（常见缺 `libstdc++6`）。
+  4. 端口冲突：同上，先排除 8788 被占用。
+  5. 查看日志：`~/.local/share/freebie-radar/logs/` 下最新日志，或终端前台运行查看 sidecar stderr。
+- 源码部署可重新生成侧车：`scripts/build-sidecar.sh`（可 `NODE_VERSION=24.x.y` 指定版本）。

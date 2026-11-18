@@ -152,6 +152,32 @@ pnpm dev:web    # 前端 Vite :5173（自动代理 /api 到 8788）
 
 ---
 
+## 桌面版 / Desktop（Tauri 打包，无需 Docker）
+
+不想装 Docker 的用户可以直接用桌面版：Tauri 壳内自带 Node.js 24 LTS 侧车，**本机原生运行**，不依赖容器；采集、SQLite、推送与网页版完全一致。
+
+```bash
+# 从源码构建（Linux）
+pnpm install
+pnpm build                       # 前端产物 → dist/web
+scripts/build-sidecar.sh         # 下载 Node 24 LTS → src-tauri/binaries/node-x86_64-unknown-linux-gnu
+pnpm tauri build                 # 产物：src-tauri/target/release/bundle/{deb,appimage}/
+
+# 安装
+sudo apt install ./freebie-radar_*_amd64.deb
+# 或
+chmod +x freebie-radar_*.AppImage && ./freebie-radar_*.AppImage
+```
+
+- 也可直接下载 GitHub Releases 里已构建好的 `.deb` / `.AppImage` 安装包。
+- 数据目录：`~/.local/share/freebie-radar`（`radar.db`、日志等，卸载软件不会删除；重装 / 升级数据零丢失）。
+- 默认监听 `http://127.0.0.1:8788`，桌面窗口与托盘菜单可直接「打开工作台 / 暂停采集 / 退出」。
+- 升级：应用内「设置 → 检查更新」一键升级；或源码方式 `git pull && pnpm install && pnpm build && scripts/build-sidecar.sh && pnpm tauri build` 后重新安装。
+
+详细的前置依赖、自启动、托盘、故障排查见 [docs/deploy.md#desktop](docs/deploy.md#desktop)。
+
+---
+
 ## 环境变量说明（`.env`）
 
 所有策略配置（AI 模型/提示词/初筛开关、多路由推送/静默时段、屏蔽词、数据源启停与周期、数据保留天数）均**在网页管理区实时热修改**，`.env` 仅需关注进程级环境变量：

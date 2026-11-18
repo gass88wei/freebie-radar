@@ -4,31 +4,128 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  typecheck:
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm build:server
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
+  tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node --test tests/*.test.ts
 
-      - name: Typecheck
-        run: npx tsc --noEmit
+  rust-check:
+    runs-on: ubuntu-22.04
+    if: hashFiles('src-tauri/Cargo.toml') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # tauri-build 在编译期会校验 bundle.resources 里的路径真实存在，
+      # 所以必须先生成前端和侧车产物，否则 cargo check 直接失败。
+      - run: pnpm build
+      - run: pnpm build:server
+      - name: Prepare sidecar binary
+        run: bash scripts/build-sidecar.sh
+      - working-directory: src-tauri
+        run: cargo check
+      - working-directory: src-tauri
+        run: cargo clippy -- -D warnings
 
-      - name: Unit tests
-        run: node --test tests/*.test.ts
-
-      - name: Build web
-        run: npx vite build
+  smoke:
+    runs-on: ubuntu-22.04
+    needs: [typecheck, tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm build:server
+      # 冒烟测两条路径：源码直跑（开发态）与 esbuild 单文件（桌面版打包态）。
+      - name: Smoke test source server
+        env:
+          PORT: 8899
+          HOST: 127.0.0.1
+          DATABASE_PATH: /tmp/radar-src.db
+          ENABLE_SCHEDULER: "false"
+        run: |
+          node --no-warnings src/server/index.ts &
+          echo $! > /tmp/src.pid
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8899/health > /dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$(cat /tmp/src.pid)" 2>/dev/null || true
+          if [ "$ok" != "1" ]; then echo "source server never became healthy"; exit 1; fi
+          echo "source server OK"
+      - name: Smoke test bundled server
+        env:
+          PORT: 8900
+          HOST: 127.0.0.1
+          DATABASE_PATH: /tmp/radar-bundle.db
+          ENABLE_SCHEDULER: "false"
+        run: |
+          node --no-warnings dist/server.mjs &
+          echo $! > /tmp/bundle.pid
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8900/health > /dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" = "1" ]; then
+            curl -sf http://127.0.0.1:8900/ > /dev/null || { echo "bundled server: index.html not served"; exit 1; }
+          fi
+          kill "$(cat /tmp/bundle.pid)" 2>/dev/null || true
+          if [ "$ok" != "1" ]; then echo "bundled server never became healthy"; exit 1; fi
+          echo "bundled server OK"

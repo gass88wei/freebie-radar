@@ -21,3 +21,8 @@ docs/fs-test.json
 shots/
 scripts/__pycache__/
 __pycache__/
+
+# Tauri
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
